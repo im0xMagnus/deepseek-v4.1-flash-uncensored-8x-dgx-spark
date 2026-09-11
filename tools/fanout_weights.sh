@@ -8,7 +8,7 @@ J="ssh -o BatchMode=yes -o ConnectTimeout=15 -o ControlPath=none"
 USER_="${SPARK_USER:-USER_PLACEHOLDER}"; PREFIX="${NODE_PREFIX:-NODE_PREFIX_PLACEHOLDER}"
 SRC_RANK="${SRC_RANK:-2}"; SRC_IP="$PREFIX.$((10 + SRC_RANK))"; HTTP_PORT=8890
 MODEL_DIR="DeepSeek-V4.1-Flash-UNCENSORED-FP8"; D="/data/models/$MODEL_DIR"
-TARGETS="${TARGETS:-0 1 3 4 5 6 7}"
+TARGETS="${TARGETS:-$(for r in 0 1 2 3 4 5 6 7; do [ "$r" != "$SRC_RANK" ] && printf "%s " "$r"; done)}"   # every rank but the source
 echo "== source rank $SRC_RANK ($SRC_IP): start HTTP server on the fabric =="
 $J "$USER_@$SRC_IP" "systemctl --user stop dsv41-http 2>/dev/null; systemctl --user reset-failed dsv41-http 2>/dev/null; systemd-run --user --unit dsv41-http --collect -p MemoryMax=1G python3 -m http.server $HTTP_PORT --bind $SRC_IP --directory /data/models >/dev/null && echo '  serving /data/models on http://$SRC_IP:$HTTP_PORT'"
 sleep 2
@@ -19,7 +19,8 @@ set -u
 SRC="$1"; MODEL_DIR="$2"; D="/data/models/$MODEL_DIR"; mkdir -p "$D"
 curl -sSf -o "$D/.manifest" "http://$SRC/$MODEL_DIR/.manifest"
 fetch(){ local p="$1" want="$2" have=0; [ -f "$D/$p" ] && have=$(stat -c %s "$D/$p"); [ "$have" = "$want" ] && { echo "ok(cached) $p"; return 0; }
-  curl -sSL --retry 6 --retry-delay 10 --retry-all-errors -C - -o "$D/$p" "http://$SRC/$MODEL_DIR/$p"
+  [ "$have" != 0 ] && rm -f "$D/$p"   # partial file: python http.server cannot resume, refetch whole
+  curl -sSL --retry 6 --retry-delay 10 --retry-all-errors -o "$D/$p" "http://$SRC/$MODEL_DIR/$p"
   have=$(stat -c %s "$D/$p" 2>/dev/null || echo 0); [ "$have" = "$want" ] && echo "ok $p" || { echo "SIZE-MISMATCH $p have=$have want=$want"; return 1; }; }
 export -f fetch; export D SRC MODEL_DIR
 grep -v $'\.safetensors\t' "$D/.manifest" | cut -f1,2 | while IFS=$'\t' read -r p s; do fetch "$p" "$s"; done

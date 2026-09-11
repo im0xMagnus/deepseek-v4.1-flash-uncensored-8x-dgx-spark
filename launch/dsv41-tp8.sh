@@ -8,6 +8,8 @@
 #   - --tensor-parallel-size 8 --nnodes 8; API on :8888 so the client config only changes the model id
 #   - EP=1 knob adds --enable-expert-parallel (gate for the moe_intermediate_size/8 question)
 #   - --ulimit nofile=1048576: NCCL 2.30 at eight ranks ran out of file descriptors at comm init (boot A, "Too many open files")
+#   - NCCL_BUFFSIZE is NOT set (knob NCCL_BUFFSIZE to override): with 16 MiB buffers the NCCL comms of eight ranks took
+#     ~30 GiB per rank before the model loaded, and vLLM refused gmu 0.80 with only 80-84 of 121.7 GiB free (boot A, attempt 2)
 # Everything else (patches, memory guards, DSpark, graphs, parsers) is his, deliberately.
 #
 # Knobs (export before running, SAME on all eight):
@@ -31,9 +33,14 @@
 #   PATCH_DIR    default $HOME/dsv41-recipe/patch (Tony's repo clone; mounts.txt lives there)
 #   VLLM_EXTRA   extra vllm serve args;  NCCL_EXTRA extra "-e K=V" docker env pairs
 #   DRYRUN       1 => run every check as a warning and print the docker command instead of starting it
+#   TP           tensor-parallel size = node count of this job (default 8). TP=4 BASE=4 PORT=8889 MPORT=29552 runs a
+#                second, independent four-node job on ranks .14-.17 (Tony's exact TP4 shape, for A/B against TP8)
+#   BASE         index of this job's first node in FAB (default 0); rank r runs on FAB[BASE+r]
+#   PORT/MPORT   API port (default 8888) and rendezvous port (default 29551)
 set -euo pipefail
-NODE_RANK="${1:?usage: dsv41-tp8.sh <0..7>}"
+NODE_RANK="${1:?usage: dsv41-tp8.sh <rank>}"
 DRYRUN="${DRYRUN:-0}"
+TP="${TP:-8}"; BASE="${BASE:-0}"
 die(){ if [ "$DRYRUN" = 1 ]; then echo "WARN(dryrun): $1" >&2; else echo "$1" >&2; exit "${2:-1}"; fi; }
 
 IMAGE="${IMAGE:-vllm-dsv41:overlay5}"
@@ -68,9 +75,9 @@ case "$IMAGE" in *deepseekv41-flash-0909*) TOK_ARGS="--tokenizer-mode deepseek_v
 # ---- rank -> fabric IP (same map as the GLM job) ----
 FAB=(NODE_PREFIX_PLACEHOLDER.10 NODE_PREFIX_PLACEHOLDER.11 NODE_PREFIX_PLACEHOLDER.12 NODE_PREFIX_PLACEHOLDER.13 \
      NODE_PREFIX_PLACEHOLDER.14 NODE_PREFIX_PLACEHOLDER.15 NODE_PREFIX_PLACEHOLDER.16 NODE_PREFIX_PLACEHOLDER.17)
-[ "$NODE_RANK" -ge 0 ] && [ "$NODE_RANK" -le 7 ] || { echo "rank must be 0-7" >&2; exit 2; }
-HOST_IP="${FAB[$NODE_RANK]}"
-HEAD_IP="${FAB[0]}"; MPORT="29551"; PORT="8888"
+[ "$NODE_RANK" -ge 0 ] && [ "$NODE_RANK" -lt "$TP" ] && [ $((BASE + TP)) -le 8 ] || { echo "rank must be 0..TP-1 and BASE+TP <= 8" >&2; exit 2; }
+HOST_IP="${FAB[$((BASE + NODE_RANK))]}"
+HEAD_IP="${FAB[$BASE]}"; MPORT="${MPORT:-29551}"; PORT="${PORT:-8888}"
 [ "$NODE_RANK" = "0" ] && HEADLESS="" || HEADLESS="--headless"
 
 # RoCEv2 GID index is per-NIC and moves across firmware updates -- probe it (from our GLM launcher).
@@ -80,7 +87,7 @@ for i in 0 1 2 3 4 5 6 7; do
   g=$(cat /sys/class/infiniband/rocep1s0f0/ports/1/gids/$i 2>/dev/null)
   case "$t" in *"RoCE v2"*) case "$g" in *ffff*) GIDX=$i; break ;; esac ;; esac
 done
-echo "rank $NODE_RANK  ip=$HOST_IP  NCCL_IB_GID_INDEX=$GIDX"
+echo "rank $NODE_RANK/$TP (node index $((BASE + NODE_RANK)))  ip=$HOST_IP  head=$HEAD_IP:$PORT  NCCL_IB_GID_INDEX=$GIDX"
 
 # ---- preflight (fail loudly; never let Docker invent an empty dir over a missing mount) ----
 test -f "$MODEL_HOST/config.json" || die "MODEL MISSING at $MODEL_HOST" 3
@@ -162,18 +169,18 @@ $DOCKER run --gpus all -d --name "$NAME" --restart no \
   -e NCCL_IB_ROCE_VERSION_NUM=2 -e NCCL_IB_ADDR_FAMILY=AF_INET -e NCCL_IB_ADDR_RANGE=NODE_PREFIX_PLACEHOLDER.0/24 \
   -e NCCL_SOCKET_IFNAME=enp1s0f0np0 -e GLOO_SOCKET_IFNAME=enp1s0f0np0 -e TP_SOCKET_IFNAME=enp1s0f0np0 -e MN_IF_NAME=enp1s0f0np0 \
   -e NCCL_CROSS_NIC=1 -e NCCL_NVLS_ENABLE=0 -e NCCL_IB_MERGE_NICS=0 -e NCCL_CUMEM_ENABLE=0 \
-  -e NCCL_IGNORE_CPU_AFFINITY=1 -e NCCL_BUFFSIZE=16777216 -e NCCL_DEBUG=WARN -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
+  -e NCCL_IGNORE_CPU_AFFINITY=1 ${NCCL_BUFFSIZE:+-e NCCL_BUFFSIZE=$NCCL_BUFFSIZE} -e NCCL_DEBUG=WARN -e TORCH_NCCL_ASYNC_ERROR_HANDLING=1 \
   $NCCL_EXTRA \
   "$IMAGE" \
     "/models/$MODEL_DIR" \
     --served-model-name deepseek-v4.1-flash --host 0.0.0.0 --port "$PORT" \
     $TOK_ARGS \
-    --tensor-parallel-size 8 $EP_ARGS --gpu-memory-utilization "$GMU" --max-model-len "$MAXLEN" \
+    --tensor-parallel-size "$TP" $EP_ARGS --gpu-memory-utilization "$GMU" --max-model-len "$MAXLEN" \
     --max-num-seqs "$SEQS" --max-num-batched-tokens "$MAX_BATCHED" \
     --engram-config '{"cpu_offload": false}' \
     --default-chat-template-kwargs "{\"thinking\": $THINKING}" \
     $TEXT_ARGS $PARSER_ARGS $SPEC_ARGS "${GRAPH_ARGS[@]}" \
-    --distributed-executor-backend mp --nnodes 8 --node-rank "$NODE_RANK" \
+    --distributed-executor-backend mp --nnodes "$TP" --node-rank "$NODE_RANK" \
     --master-addr "$HEAD_IP" --master-port "$MPORT" $HEADLESS $VLLM_EXTRA
 
 echo "launched $NAME rank=$NODE_RANK exp=$EXP_NAME image=$IMAGE patches=$PATCH_DIR gmu=$GMU maxlen=$MAXLEN seqs=$SEQS eager=$EAGER cg=${CUDAGRAPH_MODE}[${CG_SIZES}] spec=$SPEC k=$SPEC_K adapt=$SPEC_ADAPT ep=$EP engram_disk=$ENGRAM_DISK engram_local=${ENGRAM_LOCAL_MOUNT:+yes} text_only=$TEXT_ONLY parsers=$PARSERS avail=${AVAIL_GB}GiB"

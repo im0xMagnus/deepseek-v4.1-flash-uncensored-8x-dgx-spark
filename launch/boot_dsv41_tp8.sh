@@ -7,16 +7,17 @@ J="ssh -o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new
 USER_="${SPARK_USER:-USER_PLACEHOLDER}"; PREFIX="${NODE_PREFIX:-NODE_PREFIX_PLACEHOLDER}"
 LAUNCHER="${LAUNCHER:-\$HOME/dsv41-tp8/launch/dsv41-tp8.sh}"
 KNOBS=""
-for k in EXP_NAME IMAGE GMU MAXLEN SEQS MAX_BATCHED EAGER CUDAGRAPH_MODE CG_SIZES SPEC SPEC_K SPEC_ADAPT ENGRAM_DISK ENGRAM_LOCAL ENGRAM_THREADS ENGRAM_CHUNK TEXT_ONLY THINKING PARSERS EP RUST_FE PATCH_DIR VLLM_EXTRA NCCL_EXTRA; do
+for k in TP BASE PORT MPORT EXP_NAME IMAGE GMU MAXLEN SEQS MAX_BATCHED EAGER CUDAGRAPH_MODE CG_SIZES SPEC SPEC_K SPEC_ADAPT ENGRAM_DISK ENGRAM_LOCAL ENGRAM_THREADS ENGRAM_CHUNK TEXT_ONLY THINKING PARSERS EP RUST_FE PATCH_DIR VLLM_EXTRA NCCL_EXTRA; do
   v="${!k:-}"; [ -n "$v" ] && KNOBS="$KNOBS $k='$v'"
 done
 echo "knobs:$KNOBS"
+TP="${TP:-8}"; BASE="${BASE:-0}"
 run() { # rank
-  local r="$1"; local host="$USER_@$PREFIX.$((10 + r))"
+  local r="$1"; local host="$USER_@$PREFIX.$((10 + BASE + r))"
   echo "== rank $r $host =="; $J "$host" "export $KNOBS; bash $LAUNCHER $r" 2>&1 | tail -3
 }
 set -e
-for r in 7 6 5 4 3 2 1; do run "$r"; done
+for r in $(seq $((TP - 1)) -1 1); do run "$r"; done
 sleep 5
 run 0
 echo "all eight launched $(date +%FT%T)"
