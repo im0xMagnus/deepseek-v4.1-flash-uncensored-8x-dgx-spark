@@ -9,7 +9,7 @@ SRC_RANK="${SRC_RANK:-2}"; SRC_IP="$PREFIX.$((10 + SRC_RANK))"; HTTP_PORT=8891
 IMG="${IMG:-vllm-dsv41:overlay5}"; TAR="/data/models/.images/$(echo "$IMG" | tr ':/' '__').tar"
 TARGETS="${TARGETS:-0 1 3 4 5 6 7}"
 echo "== source rank $SRC_RANK: docker save $IMG -> $TAR"
-$J "$USER_@$SRC_IP" "mkdir -p /data/models/.images; [ -s $TAR ] || docker save -o $TAR $IMG; ls -la $TAR; sha256sum $TAR | cut -c1-64 > $TAR.sha256; cat $TAR.sha256"
+$J "$USER_@$SRC_IP" "mkdir -p /data/models/.images; docker save -o $TAR $IMG; ls -la $TAR; sha256sum $TAR | cut -c1-64 > $TAR.sha256; cat $TAR.sha256"
 $J "$USER_@$SRC_IP" "systemctl --user stop dsv41-http 2>/dev/null; systemctl --user reset-failed dsv41-http 2>/dev/null; systemd-run --user --unit dsv41-http --collect -p MemoryMax=1G python3 -m http.server $HTTP_PORT --bind $SRC_IP --directory /data/models/.images >/dev/null && echo '  serving on http://$SRC_IP:$HTTP_PORT'"
 sleep 2
 B=$(basename "$TAR")

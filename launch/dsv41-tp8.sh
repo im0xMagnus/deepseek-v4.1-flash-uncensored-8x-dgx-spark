@@ -7,6 +7,7 @@
 #   - weights node-local on every rank (no NFS), so ENGRAM_LOCAL defaults to 0 (rows are already local)
 #   - --tensor-parallel-size 8 --nnodes 8; API on :8888 so the client config only changes the model id
 #   - EP=1 knob adds --enable-expert-parallel (gate for the moe_intermediate_size/8 question)
+#   - --ulimit nofile=1048576: NCCL 2.30 at eight ranks ran out of file descriptors at comm init (boot A, "Too many open files")
 # Everything else (patches, memory guards, DSpark, graphs, parsers) is his, deliberately.
 #
 # Knobs (export before running, SAME on all eight):
@@ -146,7 +147,7 @@ if [ "$EP" = "1" ]; then EP_ARGS="--enable-expert-parallel"; else EP_ARGS=""; fi
 # shellcheck disable=SC2086
 $DOCKER run --gpus all -d --name "$NAME" --restart no \
   --network host --ipc host --shm-size 32g --memory 112g --memory-swap 112g \
-  --ulimit memlock=-1:-1 --cap-add IPC_LOCK --device /dev/infiniband:/dev/infiniband \
+  --ulimit memlock=-1:-1 --ulimit nofile=1048576:1048576 --cap-add IPC_LOCK --device /dev/infiniband:/dev/infiniband \
   --oom-score-adj 500 \
   -v "$MODEL_HOST:/models/$MODEL_DIR:ro" \
   -v "$CACHE_HOST_PATH:/cache" \
