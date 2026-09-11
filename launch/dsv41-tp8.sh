@@ -33,6 +33,8 @@
 #   PATCH_DIR    default $HOME/dsv41-recipe/patch (Tony's repo clone; mounts.txt lives there)
 #   VLLM_EXTRA   extra vllm serve args;  NCCL_EXTRA extra "-e K=V" docker env pairs
 #   DRYRUN       1 => run every check as a warning and print the docker command instead of starting it
+#   SERVED_NAMES model ids the API answers to (space-separated; first = primary). Default gives the uncensored build its own
+#                id so clients with a built-in "deepseek-v4.1-flash" entry (dsh) do not collide, plus the plain id as an alias
 #   TP           tensor-parallel size = node count of this job (default 8). TP=4 BASE=4 PORT=8889 MPORT=29552 runs a
 #                second, independent four-node job on ranks .14-.17 (Tony's exact TP4 shape, for A/B against TP8)
 #   BASE         index of this job's first node in FAB (default 0); rank r runs on FAB[BASE+r]
@@ -40,6 +42,7 @@
 set -euo pipefail
 NODE_RANK="${1:?usage: dsv41-tp8.sh <rank>}"
 DRYRUN="${DRYRUN:-0}"
+SERVED_NAMES="${SERVED_NAMES:-dsv41-flash-uncensored deepseek-v4.1-flash}"
 TP="${TP:-8}"; BASE="${BASE:-0}"
 die(){ if [ "$DRYRUN" = 1 ]; then echo "WARN(dryrun): $1" >&2; else echo "$1" >&2; exit "${2:-1}"; fi; }
 
@@ -173,7 +176,7 @@ $DOCKER run --gpus all -d --name "$NAME" --restart no \
   $NCCL_EXTRA \
   "$IMAGE" \
     "/models/$MODEL_DIR" \
-    --served-model-name deepseek-v4.1-flash --host 0.0.0.0 --port "$PORT" \
+    --served-model-name $SERVED_NAMES --host 0.0.0.0 --port "$PORT" \
     $TOK_ARGS \
     --tensor-parallel-size "$TP" $EP_ARGS --gpu-memory-utilization "$GMU" --max-model-len "$MAXLEN" \
     --max-num-seqs "$SEQS" --max-num-batched-tokens "$MAX_BATCHED" \

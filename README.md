@@ -93,7 +93,7 @@ EP 0, --block-size 128 (required). Container: --memory 112g --memory-swap 112g -
 
 | | 300K boot | 1M boot |
 |---|---|---|
-| KV pool | 6,819,463 tokens (22.7x at 300K) | 8,687,243 tokens at gmu 0.77 (8.3x at 1M); ~8.1M at 0.75 |
+| KV pool | 6,819,463 tokens (22.7x at 300K) | 8,687,243 tokens at gmu 0.77 (8.3x at 1M); 8,128,103 at 0.75 (7.7x, the serving value) |
 | weights per rank | 49.6 GiB loaded, 58.7 consumed with graphs | same |
 | launch to serving | ~8 min | ~9 min |
 | decode, single stream (Tony's v41bench, thinking off) | | coding 78.7, math 78.4, format 84.8, reasoning 65.9, json 49.0, prose 35.8, narrative 31.9 tok/s |
@@ -114,6 +114,10 @@ eight-way all-reduce latency per layer and the lower DSpark acceptance on the ab
 2. No `NCCL_BUFFSIZE=16777216`: with several eight-way communicators it held ~14 GiB per rank before the model loaded.
 3. gmu 0.75 (0.80 refused, 0.77 too tight on the head): eight-way NCCL holds ~24 GiB per rank outside vLLM's budget, so
    gmu x 121.7 GiB + 24 GiB + OS must fit in 121.7 GiB.
+
+One more that is about clients, not ranks: the API answers to `dsv41-flash-uncensored` first and `deepseek-v4.1-flash` as an alias
+(`SERVED_NAMES` knob). A coding client with a built-in catalog entry for DeepSeek's own `deepseek-v4.1-flash` will collide with a
+hand-declared provider that reuses that id; giving the uncensored build its own id avoids it.
 
 ## Speed levers, checked 2026-09-11
 
