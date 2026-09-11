@@ -33,6 +33,10 @@
 #   PATCH_DIR    default $HOME/dsv41-recipe/patch (Tony's repo clone; mounts.txt lives there)
 #   VLLM_EXTRA   extra vllm serve args;  NCCL_EXTRA extra "-e K=V" docker env pairs
 #   DRYRUN       1 => run every check as a warning and print the docker command instead of starting it
+#   DRAFT_SAMPLE dspark draft sampler: probabilistic (default, Tony's boot 10) | greedy (vLLM's default; neko-legends measured
+#                +25-36% single-stream on the same uncensored checkpoint family with acceptance unchanged; validate quality first)
+#   NCCL_TUNED   1 => 8 channels, 1 MiB buffers, LL128 off (rhys101's 8x Spark A/B: +20-26% aggregate, ~11 GiB/node back;
+#                LL128 off is also a correctness guard on GB10: NCCL #2001/#2053). Default 0 until measured here.
 #   SERVED_NAMES model ids the API answers to (space-separated; first = primary). Default gives the uncensored build its own
 #                id so clients with a built-in "deepseek-v4.1-flash" entry (dsh) do not collide, plus the plain id as an alias
 #   TP           tensor-parallel size = node count of this job (default 8). TP=4 BASE=4 PORT=8889 MPORT=29552 runs a
@@ -43,6 +47,8 @@ set -euo pipefail
 NODE_RANK="${1:?usage: dsv41-tp8.sh <rank>}"
 DRYRUN="${DRYRUN:-0}"
 SERVED_NAMES="${SERVED_NAMES:-dsv41-flash-uncensored deepseek-v4.1-flash}"
+DRAFT_SAMPLE="${DRAFT_SAMPLE:-probabilistic}"
+NCCL_TUNED="${NCCL_TUNED:-0}"
 TP="${TP:-8}"; BASE="${BASE:-0}"
 die(){ if [ "$DRYRUN" = 1 ]; then echo "WARN(dryrun): $1" >&2; else echo "$1" >&2; exit "${2:-1}"; fi; }
 
@@ -148,11 +154,12 @@ else
 fi
 if [ "$EAGER" = "1" ]; then SPEC_ADAPT=false; else SPEC_ADAPT="${SPEC_ADAPT:-false}"; fi
 if [ "$SPEC" = "dspark" ]; then
-  SPEC_ARGS="--speculative-config {\"method\":\"dspark\",\"num_speculative_tokens\":${SPEC_K},\"draft_sample_method\":\"probabilistic\",\"rejection_sample_method\":\"block\",\"enable_adaptive_verification\":${SPEC_ADAPT}}"
+  SPEC_ARGS="--speculative-config {\"method\":\"dspark\",\"num_speculative_tokens\":${SPEC_K},\"draft_sample_method\":\"${DRAFT_SAMPLE}\",\"rejection_sample_method\":\"block\",\"enable_adaptive_verification\":${SPEC_ADAPT}}"
 else SPEC_ARGS=""; fi
 if [ "$TEXT_ONLY" = "1" ]; then TEXT_ARGS="--language-model-only"; else TEXT_ARGS=""; fi
 if [ "$PARSERS" = "1" ]; then PARSER_ARGS="--tool-call-parser deepseek_v41 --enable-auto-tool-choice --reasoning-parser deepseek_v41"; else PARSER_ARGS=""; fi
 if [ "$EP" = "1" ]; then EP_ARGS="--enable-expert-parallel"; else EP_ARGS=""; fi
+if [ "$NCCL_TUNED" = "1" ]; then NCCL_EXTRA="$NCCL_EXTRA -e NCCL_MAX_CTAS=8 -e NCCL_MIN_CTAS=8 -e NCCL_MAX_NCHANNELS=8 -e NCCL_BUFFSIZE=1048576 -e NCCL_LL128_BUFFSIZE=262080 -e NCCL_PROTO=^LL128"; fi
 
 # shellcheck disable=SC2086
 $DOCKER run --gpus all -d --name "$NAME" --restart no \
@@ -186,7 +193,7 @@ $DOCKER run --gpus all -d --name "$NAME" --restart no \
     --distributed-executor-backend mp --nnodes "$TP" --node-rank "$NODE_RANK" \
     --master-addr "$HEAD_IP" --master-port "$MPORT" $HEADLESS $VLLM_EXTRA
 
-echo "launched $NAME rank=$NODE_RANK exp=$EXP_NAME image=$IMAGE patches=$PATCH_DIR gmu=$GMU maxlen=$MAXLEN seqs=$SEQS eager=$EAGER cg=${CUDAGRAPH_MODE}[${CG_SIZES}] spec=$SPEC k=$SPEC_K adapt=$SPEC_ADAPT ep=$EP engram_disk=$ENGRAM_DISK engram_local=${ENGRAM_LOCAL_MOUNT:+yes} text_only=$TEXT_ONLY parsers=$PARSERS avail=${AVAIL_GB}GiB"
+echo "launched $NAME rank=$NODE_RANK exp=$EXP_NAME image=$IMAGE patches=$PATCH_DIR draft=$DRAFT_SAMPLE nccl_tuned=$NCCL_TUNED gmu=$GMU maxlen=$MAXLEN seqs=$SEQS eager=$EAGER cg=${CUDAGRAPH_MODE}[${CG_SIZES}] spec=$SPEC k=$SPEC_K adapt=$SPEC_ADAPT ep=$EP engram_disk=$ENGRAM_DISK engram_local=${ENGRAM_LOCAL_MOUNT:+yes} text_only=$TEXT_ONLY parsers=$PARSERS avail=${AVAIL_GB}GiB"
 [ "$DRYRUN" = 1 ] && exit 0
 sleep 3
 docker ps --format '{{.Names}} {{.Status}}' | grep "$NAME" || { echo "$NAME exited" >&2; docker logs --tail 40 "$NAME" >&2; exit 1; }

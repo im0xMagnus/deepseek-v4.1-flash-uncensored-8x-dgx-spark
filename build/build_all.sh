@@ -16,8 +16,8 @@ R="${RECIPE_DIR:-$HOME/dsv41-recipe}"
 SRC="${SRC_DIR:-/data/v41build/src}"
 BASE_TAG="vllm/vllm-openai:nightly-8a728663c1c3eeace834a95f5654fa653cc1998c"
 BASE_DIGEST="sha256:a551e05307cd2e0092139d84db32af9c97e67d2eeeff072d21e429131d8c23f0"   # arm64 manifest, checked 2026-09-11
-BRANCH="${VLLM_BRANCH:-dsv41-feat}"
-BRANCH_SHA="${VLLM_BRANCH_SHA:-}"     # set to pin; empty = record whatever the branch head is at clone time
+BRANCH_SHA="${VLLM_BRANCH_SHA:-e47aa780bccf59f59dfa2cbb18e17a10b4fe69ba}"   # the commit Tony's patches target; dsv41-feat was force-pushed
+                                                                        # 2026-09-11 00:49 UTC, merged (#56214) and deleted 09:11 UTC. Fetch by sha.
 LOG="${LOG:-$HOME/dsv41-build-$(date -u +%Y%m%dT%H%M%SZ).log}"
 exec > >(tee -a "$LOG") 2>&1
 t0=$(date +%s); stamp(){ echo "[$(date -u +%H:%M:%SZ) +$(( ($(date +%s)-t0)/60 ))m] $*"; }
@@ -34,11 +34,11 @@ if [ "${FORCE:-0}" = 1 ] || ! have vllm-dsv41:overlay1; then
   docker pull "vllm/vllm-openai@$BASE_DIGEST"
   docker tag "vllm/vllm-openai@$BASE_DIGEST" "$BASE_TAG"
   if [ ! -d "$SRC/.git" ]; then
-    stamp "stage 1: clone vllm branch $BRANCH"
-    mkdir -p "$(dirname "$SRC")"; git clone --branch "$BRANCH" --single-branch https://github.com/vllm-project/vllm.git "$SRC"
+    stamp "stage 1: clone vllm (default branch; the pinned commit is fetched by sha)"
+    mkdir -p "$(dirname "$SRC")"; git clone https://github.com/vllm-project/vllm.git "$SRC"
   fi
-  if [ -n "$BRANCH_SHA" ]; then git -C "$SRC" fetch origin "$BRANCH_SHA" && git -C "$SRC" checkout -q "$BRANCH_SHA"; fi
-  echo "vllm $BRANCH @ $(git -C "$SRC" rev-parse HEAD)" | tee "$SRC/.built-from"
+  git -C "$SRC" fetch origin "$BRANCH_SHA" && git -C "$SRC" checkout -q "$BRANCH_SHA"
+  echo "vllm @ $(git -C "$SRC" rev-parse HEAD)" | tee "$SRC/.built-from"
   stamp "stage 1: start v41build container (base image + git/cmake/ninja)"
   docker rm -f v41build >/dev/null 2>&1 || true
   docker run -d --name v41build --gpus all --network host --memory "${BUILD_MEM:-96g}" \
