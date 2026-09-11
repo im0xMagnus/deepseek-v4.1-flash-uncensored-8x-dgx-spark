@@ -5,8 +5,9 @@ calling on, 300K then 1M context. Companion to
 [glm-5.3-uncensored-8x-dgx-spark](https://github.com/im0xMagnus/glm-5.3-uncensored-8x-dgx-spark) (the job this
 cluster runs today).
 
-STATUS 2026-09-11: PRE-BOOT. Nothing in this tree has been booted at TP8 yet. Every number below that is
-not marked "measured (Tony, TP4)" is an estimate, to be replaced by the profile line and the benches on boot A.
+STATUS 2026-09-11 21:00: SERVING at 1,048,576 context on eight nodes (TP8, gmu 0.75, DSpark k=5, CUDA graphs, vision and tools
+on). Measured, not estimated, see results/. The first serving boots produced one repeated garbage token until the image was rebuilt at
+the exact vLLM branch commit Tony's patches target (e47aa780b; the branch was force-pushed after his build). Pin the commit.
 
 This is tonyd2wild's four-node recipe (Tech2Wild / Kai, boot 10, repo pinned 592540c6) carried to eight nodes.
 Only the eight-rank deltas changed; the model-side fixes (seven bind-mounted patches, Engram-on-disk, DSpark k=5,
@@ -88,12 +89,31 @@ at sizes = multiples of 5 and 6 up to 48, ENGRAM_DISK 1, ENGRAM_LOCAL 0, TEXT_ON
 PARSERS 1 (deepseek_v41 tool + reasoning parsers), THINKING false (per-request chat_template_kwargs turns it on),
 EP 0, --block-size 128 (required). Container: --memory 112g --memory-swap 112g --shm-size 32g, MAX_JOBS 2.
 
-## Expected (derived from Tony's TP4 measurements; replace on boot A)
+## Measured (2026-09-11, dealignai UNCENSORED-FP8, eight GB10 on 200G RoCE; method in results/results-bootA6.md)
 
-Per rank: ~59 GiB weights as shipped (~41 GiB with Engram left on disk), KV ~33 GiB at gmu 0.80 (~6M tokens of pool
-at ~5 KB/token/rank, so 1M context with 5-6 concurrent 1M sequences is the arithmetic, not the promise).
-Decode: code 90-110 tok/s at C1 (TP4 measured 73.8), ~200 aggregate at C6-C8 (TP4 measured 131.9 at C6), prose 30-35.
-Prefill 1.5-2.5K tok/s (TP4 measured 0.9-1.5K). DSpark acceptance ~3.5 tokens per step (TP4 measured 3.57).
+| | 300K boot | 1M boot |
+|---|---|---|
+| KV pool | 6,819,463 tokens (22.7x at 300K) | 8,687,243 tokens at gmu 0.77 (8.3x at 1M); ~8.1M at 0.75 |
+| weights per rank | 49.6 GiB loaded, 58.7 consumed with graphs | same |
+| launch to serving | ~8 min | ~9 min |
+| decode, single stream (Tony's v41bench, thinking off) | | coding 78.7, math 78.4, format 84.8, reasoning 65.9, json 49.0, prose 35.8, narrative 31.9 tok/s |
+| aggregate | 126 tok/s at C8 (500-token fixed prompt) | C2 83.6, C4 122.1, C6 139.1, C8 155.7 tok/s (per-stream 57 -> 23) |
+| TTFT, short prompts | | 0.31 s at C1, 0.5-0.7 s at C2-C8 |
+| cold prefill | 1,321 tok/s at 200K | 1,929 at 3K, 2,141 at 12K, 2,068 at 47K, 1,787 at 93K, 1,202 at 500K, 844 at 900K |
+| needle, depth 0.5 | 200K PASS (TTFT 150 s) | 500K PASS (TTFT 414 s), 900K PASS (TTFT 1,060 s) |
+| DSpark | 2.94 accepted tokens per step (Tony, original weights, TP4: 3.57) | |
+| head node free memory | 6.5 GiB idle | 3.6 GiB idle, 1.1-1.4 GiB under a 500K-900K prefill at gmu 0.77 (why 0.75) |
+
+Reference: Tony TP4, original checkpoint, boot 10: code 73.8 tok/s at C1, 131.9 aggregate at C6, prefill 0.9-1.5K tok/s, KV
+1,032,963 tokens at 300K. Eight ranks buy the pool (6.6x), 1M with concurrency, and aggregate; not single-stream decode, which pays
+eight-way all-reduce latency per layer and the lower DSpark acceptance on the ablated checkpoint.
+
+## The three eight-rank deltas that were needed (none in the TP4 launcher)
+
+1. `--ulimit nofile=1048576:1048576`: NCCL 2.30's socket accept at eight ranks exceeds the container's soft limit of 1024.
+2. No `NCCL_BUFFSIZE=16777216`: with several eight-way communicators it held ~14 GiB per rank before the model loaded.
+3. gmu 0.75 (0.80 refused, 0.77 too tight on the head): eight-way NCCL holds ~24 GiB per rank outside vLLM's budget, so
+   gmu x 121.7 GiB + 24 GiB + OS must fit in 121.7 GiB.
 
 ## Speed levers, checked 2026-09-11
 

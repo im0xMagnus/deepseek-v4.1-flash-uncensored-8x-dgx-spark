@@ -17,3 +17,12 @@ Vision: red 64x64 PNG -> "Red" (201 prompt tokens, 0.7 s). Tools: get_weather("S
 
 Reference: Tony TP4 (original DeepSeek checkpoint, boot 10): code 73.8 c1, 131.9 aggregate c6, prefill 0.9-1.5K, KV 1,032,963 tokens at 300K.
 Read: eight ranks buy KV pool (6.6x) and prefill, not single-stream decode (8-way all-reduce latency; lower DSpark acceptance on the ablated checkpoint).
+
+# Boot B: same config, --max-model-len 1048576 (2026-09-11 20:07 AEST, gmu 0.77)
+
+Profile: KV 8,687,243 tokens = 8.28x concurrency at 1M; head idle MemAvailable 3.6 GiB, 1.1-1.4 GiB under a 500K/900K prefill (workers ~2.1).
+v41bench (prompt set v1, thinking off): aggregate C1 50.5 / C2 83.6 / C4 122.1 / C6 139.1 / C8 155.7 tok/s; per-stream C1 57.1 -> C8 22.7;
+coding C1 78.7, C6 44.7 (241 aggregate); math C1 78.4; format 84.8; prose 35.8; TTFT 0.31 s at C1, 0.5-0.7 s at C2-C8 (short prompts).
+Cold prefill: 2,950 tok in 1.53 s (1,929 tok/s); 11,592 in 5.4 s (2,141); 46,810 in 22.6 s (2,068); 93,335 in 52.2 s (1,787).
+Needles (depth 0.5): 500K PASS (496,963 tokens, TTFT 413.6 s, 1,202 tok/s); 900K PASS (894,548 tokens, TTFT 1,059.9 s, 844 tok/s).
+Decision: serve 1M at gmu 0.75 (2.4 GiB/rank headroom back, ~600K tokens of pool given up).
