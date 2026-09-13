@@ -19,6 +19,8 @@
 #   MAXLEN       --max-model-len (default 300000)
 #   SEQS         --max-num-seqs (default 8)
 #   MAX_BATCHED  --max-num-batched-tokens (default 8192)
+#   LONG_PREFILL --long-prefill-token-threshold (default 0 = off). >0 caps each step's slice of a long prefill so
+#                co-scheduled decodes keep stepping (a cold 500K prompt otherwise starves every other session)
 #   EAGER        1 => --enforce-eager. 0 (default) => CUDA graphs, CUDAGRAPH_MODE (default FULL_AND_PIECEWISE)
 #   CG_SIZES     capture sizes; default for dspark = multiples of k and k+1 up to SEQS*(k+1) (exact graphs, FlashInfer #5015)
 #   SPEC_ADAPT   adaptive verification (default false: padded rows hang SM12x sparse MLA, FlashInfer #5015)
@@ -58,6 +60,8 @@ GMU="${GMU:-0.80}"
 MAXLEN="${MAXLEN:-300000}"
 SEQS="${SEQS:-8}"
 MAX_BATCHED="${MAX_BATCHED:-8192}"
+LONG_PREFILL="${LONG_PREFILL:-0}"
+LP_ARGS=""; [ "${LONG_PREFILL:-0}" -gt 0 ] 2>/dev/null && LP_ARGS="--long-prefill-token-threshold $LONG_PREFILL"
 EAGER="${EAGER:-0}"
 CUDAGRAPH_MODE="${CUDAGRAPH_MODE:-FULL_AND_PIECEWISE}"
 CG_SIZES="${CG_SIZES:-}"
@@ -186,14 +190,14 @@ $DOCKER run --gpus all -d --name "$NAME" --restart no \
     --served-model-name $SERVED_NAMES --host 0.0.0.0 --port "$PORT" \
     $TOK_ARGS \
     --tensor-parallel-size "$TP" $EP_ARGS --gpu-memory-utilization "$GMU" --max-model-len "$MAXLEN" \
-    --max-num-seqs "$SEQS" --max-num-batched-tokens "$MAX_BATCHED" \
+    --max-num-seqs "$SEQS" --max-num-batched-tokens "$MAX_BATCHED" $LP_ARGS \
     --engram-config '{"cpu_offload": false}' \
     --default-chat-template-kwargs "{\"thinking\": $THINKING}" \
     $TEXT_ARGS $PARSER_ARGS $SPEC_ARGS "${GRAPH_ARGS[@]}" \
     --distributed-executor-backend mp --nnodes "$TP" --node-rank "$NODE_RANK" \
     --master-addr "$HEAD_IP" --master-port "$MPORT" $HEADLESS $VLLM_EXTRA
 
-echo "launched $NAME rank=$NODE_RANK exp=$EXP_NAME image=$IMAGE patches=$PATCH_DIR draft=$DRAFT_SAMPLE nccl_tuned=$NCCL_TUNED gmu=$GMU maxlen=$MAXLEN seqs=$SEQS eager=$EAGER cg=${CUDAGRAPH_MODE}[${CG_SIZES}] spec=$SPEC k=$SPEC_K adapt=$SPEC_ADAPT ep=$EP engram_disk=$ENGRAM_DISK engram_local=${ENGRAM_LOCAL_MOUNT:+yes} text_only=$TEXT_ONLY parsers=$PARSERS avail=${AVAIL_GB}GiB"
+echo "launched $NAME rank=$NODE_RANK exp=$EXP_NAME image=$IMAGE patches=$PATCH_DIR draft=$DRAFT_SAMPLE nccl_tuned=$NCCL_TUNED gmu=$GMU maxlen=$MAXLEN seqs=$SEQS long_prefill=$LONG_PREFILL eager=$EAGER cg=${CUDAGRAPH_MODE}[${CG_SIZES}] spec=$SPEC k=$SPEC_K adapt=$SPEC_ADAPT ep=$EP engram_disk=$ENGRAM_DISK engram_local=${ENGRAM_LOCAL_MOUNT:+yes} text_only=$TEXT_ONLY parsers=$PARSERS avail=${AVAIL_GB}GiB"
 [ "$DRYRUN" = 1 ] && exit 0
 sleep 3
 docker ps --format '{{.Names}} {{.Status}}' | grep "$NAME" || { echo "$NAME exited" >&2; docker logs --tail 40 "$NAME" >&2; exit 1; }

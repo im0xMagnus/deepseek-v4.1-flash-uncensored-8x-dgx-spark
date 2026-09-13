@@ -88,6 +88,8 @@ MAX_BATCHED 8192, SPEC dspark SPEC_K 5, SPEC_ADAPT false (FlashInfer #5015), EAG
 at sizes = multiples of 5 and 6 up to 48, ENGRAM_DISK 1, ENGRAM_LOCAL 0, TEXT_ONLY 0 (vision on, 4 images/prompt),
 PARSERS 1 (deepseek_v41 tool + reasoning parsers), THINKING false (per-request chat_template_kwargs turns it on),
 EP 0, --block-size 128 (required). Container: --memory 112g --memory-swap 112g --shm-size 32g, MAX_JOBS 2.
+LONG_PREFILL 2048 in bootB (launcher default 0 = off): --long-prefill-token-threshold, caps each step's slice of a
+long prefill so decodes co-scheduled with a cold 500K prompt keep stepping (see the 2026-09-13 lever below).
 
 ## Measured (2026-09-11, dealignai UNCENSORED-FP8, eight GB10 on 200G RoCE; method in results/results-bootA6.md)
 
@@ -120,6 +122,15 @@ One more that is about clients, not ranks: the API answers to `dsv41-flash-uncen
 hand-declared provider that reuses that id; giving the uncensored build its own id avoids it.
 
 ## Speed levers, checked 2026-09-11
+
+- 2026-09-13, fairness during long prefills: vLLM's logger only adds a request's prompt tokens when its first output
+  token appears, so a cold 400K-600K prompt logs `prompt throughput: 0.0` and `generation ~1 tok/s` for its whole
+  duration (each 8192-token chunk step takes 6-10 s at that context; co-scheduled decodes get one step per chunk).
+  It looks like a hang and is not (`GPU KV cache usage` creeping at the prefill rate is the tell). Relaunched with
+  `--long-prefill-token-threshold 2048` (LONG_PREFILL): a co-scheduled short request decoded at 2.9-4.3 tok/s during a
+  cold 214K prefill instead of 0.1-1; the prefill itself ran at 1,295 tok/s (200K needle TTFT 150 s -> 165 s with
+  probes competing); warm single-stream unchanged at 55 ms/step. 1024 or 512 buys decodes more at a prefill cost.
+  Also: do not judge decode speed in the first 5 min after a boot (76-83 ms/step cold, converges to 55-60).
 
 - No DFlash, DFlash2 or EAGLE draft exists for DeepSeek-V4.1-Flash (HF search: 33 repos, the only draft-like ones are
   MLX/GGUF MTP variants). The vLLM dsv41-feat branch exposes DSpark only (the checkpoint's own draft layers, k=5 is the
