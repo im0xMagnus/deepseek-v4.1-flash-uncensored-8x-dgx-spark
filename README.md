@@ -3,15 +3,38 @@
 Eight GB10 nodes on a 200G RoCE fabric, tensor parallel 8, DSpark speculative decoding, CUDA graphs, vision and tool
 calling on, 300K then 1M context. Companion to
 [glm-5.3-uncensored-8x-dgx-spark](https://github.com/im0xMagnus/glm-5.3-uncensored-8x-dgx-spark) (the job this
-cluster runs today).
+cluster ran until V4.1 took over).
 
-STATUS 2026-09-11 21:00: SERVING at 1,048,576 context on eight nodes (TP8, gmu 0.75, DSpark k=5, CUDA graphs, vision and tools
-on). Measured, not estimated, see results/. The first serving boots produced one repeated garbage token until the image was rebuilt at
+STATUS 2026-09-14: SERVING at 1,048,576 context on eight nodes since 2026-09-11 (TP8, gmu 0.75, DSpark k=5, CUDA graphs,
+vision and tools on, `--long-prefill-token-threshold 2048` since 2026-09-13). Measured, not estimated, see results/. The first serving boots produced one repeated garbage token until the image was rebuilt at
 the exact vLLM branch commit Tony's patches target (e47aa780b; the branch was force-pushed after his build). Pin the commit.
 
 This is tonyd2wild's four-node recipe (Tech2Wild / Kai, boot 10, repo pinned 592540c6) carried to eight nodes.
 Only the eight-rank deltas changed; the model-side fixes (seven bind-mounted patches, Engram-on-disk, DSpark k=5,
 exact-size CUDA graphs, block size 128) are his, unmodified. Read his RECIPE.md and README boot log first.
+
+## At a glance (1M serving config, eight GB10, warm, thinking off)
+
+| | |
+|---|---|
+| KV pool | 8.1-8.2M tokens per boot at gmu 0.75 = 7.7-7.9 concurrent 1M-token requests |
+| single stream | coding 79-83 tok/s, math 78, counting 98-104, prose 36; 5.15-5.85 accepted tokens per step at 55-62 ms per step |
+| aggregate | 156 tok/s at C8 (mixed prompt set), 241 tok/s at C6 coding |
+| TTFT, short prompt | 0.31 s at C1, 0.5-0.7 s at C2-C8 |
+| cold prefill | 2,100 tok/s at 12K, 1,800 at 93K, 1,200 at 500K, 840 at 900K |
+| needle at depth 0.5 | PASS at 200K, 500K and 900K (TTFT 150 s, 414 s, 1,060 s) |
+| launch to serving | 7-9 min |
+
+Method and raw numbers: [results/](results/) and the Measured section below. Write-ups:
+
+- [Field report on the dealignai model page (discussion #1)](https://huggingface.co/dealignai/DeepSeek-V4.1-Flash-UNCENSORED-FP8/discussions/1)
+- [What made ours work vs. the four-node garble, on Tony's issue #2](https://github.com/tonyd2wild/DeepSeek-V4.1-Flash-vLLM-DGX-Spark/issues/2#issuecomment-5645953049)
+- Author: [@0xmagnus on X](https://x.com/0xmagnus), [0xMagnus on Hugging Face](https://huggingface.co/0xMagnus)
+
+Running this on your own Sparks, at any node count? Open an
+[issue](https://github.com/im0xMagnus/deepseek-v4.1-flash-uncensored-8x-dgx-spark/issues) or a
+[discussion](https://github.com/im0xMagnus/deepseek-v4.1-flash-uncensored-8x-dgx-spark/discussions) with your node count,
+image commit and `tools/idletest.py` tokens per step. Numbers are worth more side by side than alone.
 
 ## Placeholders
 
@@ -103,12 +126,14 @@ long prefill so decodes co-scheduled with a cold 500K prompt keep stepping (see 
 | TTFT, short prompts | | 0.31 s at C1, 0.5-0.7 s at C2-C8 |
 | cold prefill | 1,321 tok/s at 200K | 1,929 at 3K, 2,141 at 12K, 2,068 at 47K, 1,787 at 93K, 1,202 at 500K, 844 at 900K |
 | needle, depth 0.5 | 200K PASS (TTFT 150 s) | 500K PASS (TTFT 414 s), 900K PASS (TTFT 1,060 s) |
-| DSpark | 2.94 accepted tokens per step (Tony, original weights, TP4: 3.57) | |
+| DSpark acceptance | 2.94 accepted tokens per step on the smoke prompt mix (not comparable to Tony's 3.57, a different prompt mix) | 5.85 tokens per step on counting, 5.15 on code with Tony's `tools/idletest.py`, warm: the same as the original weights on TP4 fleets. Lifetime mean 3.6 on real coding-agent traffic |
 | head node free memory | 6.5 GiB idle | 3.6 GiB idle, 1.1-1.4 GiB under a 500K-900K prefill at gmu 0.77 (why 0.75) |
 
 Reference: Tony TP4, original checkpoint, boot 10: code 73.8 tok/s at C1, 131.9 aggregate at C6, prefill 0.9-1.5K tok/s, KV
 1,032,963 tokens at 300K. Eight ranks buy the pool (6.6x), 1M with concurrency, and aggregate; not single-stream decode, which pays
-eight-way all-reduce latency per layer and the lower DSpark acceptance on the ablated checkpoint.
+eight-way all-reduce latency per layer. (An earlier revision of this README blamed part of that on lower DSpark acceptance on
+the ablated checkpoint. `tools/idletest.py` shows acceptance identical to the original weights; the 2.94 vs 3.57 gap was the
+prompt mix, not the ablation.)
 
 ## The three eight-rank deltas that were needed (none in the TP4 launcher)
 
@@ -140,11 +165,11 @@ hand-declared provider that reuses that id; giving the uncensored build its own 
 - After boot A, one per boot: EP=1 (EP8 gives each rank 48 whole experts; try if the MoE at 2304/8 trips or decode is
   below estimate), SEQS 12-16, MAX_BATCHED 16384 for prefill, head-node host headroom under 4 sessions.
 
-## What this repo will add once it has booted
+## Still to add
 
-Measured TP8 numbers (decode per stream by category at C1, aggregate at C2-C8, TTFT, prefill at 32K-1M, needle at
-200K/500K/900K, DSpark acceptance from /metrics, host headroom under load), the profile lines from boot A and boot B,
-and every failure mode the eight-rank step adds to Tony's boot log. Until then this is a staged plan, not a result.
+The per-boot profile lines for boots A and B, host headroom under four concurrent coding sessions, and the client-side
+setup for running a coding harness against the cluster from another machine. Everything else promised here before the
+first boot is in the Measured table above.
 
 ## Credits
 
